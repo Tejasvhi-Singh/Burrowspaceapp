@@ -12,4 +12,4 @@ if [ -f server.js.tmp ]; then
 fi
 
 # Start the server
-node server.js 
+node server.js

@@ -11,4 +11,4 @@ services:
       - key: NODE_ENV
         value: production
     plan: free
-    healthCheckPath: /status 
+    healthCheckPath: /status
