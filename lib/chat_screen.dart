@@ -253,8 +253,11 @@ class _ChatScreenState extends State<ChatScreen> {
       // Get filename from path
       final fileName = filePath.split('/').last.split('\\').last;
 
+      // Log the file being shared
+      debugPrint('Sharing file: $fileName');
+
       // Start file transfer
-      _showNotification('Starting file transfer...');
+      _showNotification('Starting file transfer for $fileName...');
 
       setState(() {
         _transferProgress[filePath] = 0.0;
