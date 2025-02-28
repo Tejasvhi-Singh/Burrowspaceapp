@@ -56,13 +56,6 @@ class FileTransferService {
     _eventHandlers[event] = handler;
   }
 
-  // Trigger event handlers
-  void _triggerEvent(String event, dynamic data) {
-    if (_eventHandlers.containsKey(event)) {
-      _eventHandlers[event]!(data);
-    }
-  }
-
   /// Request a file transfer to another user
   Future<Map<String, dynamic>?> requestFileTransfer({
     required String receiverId,

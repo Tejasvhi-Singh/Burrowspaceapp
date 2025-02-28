@@ -2,11 +2,11 @@ services:
   - type: web
     name: burrowspace-libp2p-server
     env: node
-    buildCommand: cd libp2p_server && npm install
-    startCommand: cd libp2p_server && npm start
+    nodeVersion: 18.17.1
+    buildCommand: npm install
+    startCommand: node server.js
     envVars:
-      - key: NODE_VERSION
-        value: 18
       - key: PORT
         value: 3000
+    plan: free
     healthCheckPath: / 

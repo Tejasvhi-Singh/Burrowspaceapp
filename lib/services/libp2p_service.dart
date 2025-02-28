@@ -322,7 +322,7 @@ class LibP2PService {
       if (currentUser == null) return false;
 
       final userId = currentUser.uid;
-      final topic = 'p2p-transfer'; // Default topic for file transfers
+      const topic = 'p2p-transfer'; // Default topic for file transfers
 
       final response = await http
           .post(
