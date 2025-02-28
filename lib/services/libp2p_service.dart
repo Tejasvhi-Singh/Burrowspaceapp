@@ -15,10 +15,11 @@ class LibP2PService {
   LibP2PService._internal();
 
   // Server configuration
-  String _serverUrl = 'http://127.0.0.1:3000';
+  String _serverUrl = 'https://burrowspaceapp-libp2p.onrender.com';
   bool _isConnected = false;
   String? _peerId;
   List<String>? _peerAddresses;
+  bool _isWakingServer = false;
 
   // Firestore reference for user peer data
   final _firestore = FirebaseFirestore.instance;
@@ -38,9 +39,26 @@ class LibP2PService {
 
       // Check if the server is up
       final status = await checkServerStatus();
+
+      // If server is not responding, try to wake it up
+      if (!status && !_isWakingServer) {
+        // Only attempt wake-up once
+        _isWakingServer = true;
+        debugPrint('Server might be sleeping. Attempting to wake it up...');
+        // Ping the server to wake it up - Render spins down free tier after inactivity
+        await http.get(Uri.parse(_serverUrl));
+        // Wait a bit for server to start
+        await Future.delayed(const Duration(seconds: 5));
+        // Retry status check
+        final retryStatus = await checkServerStatus();
+        _isWakingServer = false;
+        return retryStatus;
+      }
+
       return status;
     } catch (e) {
       debugPrint('Error initializing LibP2P service: $e');
+      _isWakingServer = false;
       return false;
     }
   }
@@ -51,6 +69,14 @@ class LibP2PService {
 
     // Save configuration
     await _saveConfig();
+
+    // Reset connection state
+    _isConnected = false;
+    _peerId = null;
+    _peerAddresses = null;
+
+    // Check connection to new server
+    await checkServerStatus();
   }
 
   /// Load saved configuration
@@ -77,16 +103,19 @@ class LibP2PService {
   Future<bool> checkServerStatus() async {
     try {
       final response = await http
-          .get(Uri.parse('$_serverUrl/status'))
-          .timeout(const Duration(seconds: 5));
+          .get(Uri.parse('$_serverUrl/'))
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        return data['status'] == 'online';
+        _isConnected = data['status'] == 'BurrowSpace libp2p Server Running';
+        return _isConnected;
       }
+      _isConnected = false;
       return false;
     } catch (e) {
       debugPrint('Error checking LibP2P server status: $e');
+      _isConnected = false;
       return false;
     }
   }
@@ -119,15 +148,31 @@ class LibP2PService {
     }
 
     try {
+      // Make sure server is awake
+      if (!_isConnected) {
+        final isAwake = await initialize();
+        if (!isAwake) {
+          debugPrint('Cannot initialize node: Server not connected');
+          return null;
+        }
+      }
+
+      final currentUser = _auth.currentUser;
+      if (currentUser == null) {
+        debugPrint('Cannot initialize node: User not logged in');
+        return null;
+      }
+
+      final userId = currentUser.uid;
       final deviceId = await _generateDeviceId();
 
       final response = await http
           .post(
-            Uri.parse('$_serverUrl/init'),
+            Uri.parse('$_serverUrl/api/node/init'),
             headers: {'Content-Type': 'application/json'},
-            body: json.encode({'deviceId': deviceId}),
+            body: json.encode({'userId': userId, 'deviceId': deviceId}),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -135,8 +180,13 @@ class LibP2PService {
         _peerAddresses = List<String>.from(data['addresses']);
         _isConnected = true;
 
+        debugPrint('Successfully initialized libp2p node with ID: $_peerId');
         return data;
       }
+
+      debugPrint(
+        'Error initializing node: ${response.statusCode} - ${response.body}',
+      );
       return null;
     } catch (e) {
       debugPrint('Error initializing libp2p node: $e');
@@ -147,21 +197,30 @@ class LibP2PService {
   /// Connect to a peer
   Future<bool> connectToPeer({
     required String peerId,
-    required String? multiaddr,
+    String? multiaddr,
   }) async {
     if (!_isConnected || _peerId == null) {
-      await initNode();
-      if (!_isConnected) return false;
+      final nodeInit = await initNode();
+      if (nodeInit == null) return false;
     }
 
     try {
+      final currentUser = _auth.currentUser;
+      if (currentUser == null) return false;
+
+      final userId = currentUser.uid;
+
       final response = await http
           .post(
-            Uri.parse('$_serverUrl/connect'),
+            Uri.parse('$_serverUrl/api/peer/connect'),
             headers: {'Content-Type': 'application/json'},
-            body: json.encode({'targetPeerId': peerId, 'multiaddr': multiaddr}),
+            body: json.encode({
+              'userId': userId,
+              'peerId': peerId,
+              'multiaddr': multiaddr,
+            }),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
 
       return response.statusCode == 200;
     } catch (e) {
@@ -222,6 +281,7 @@ class LibP2PService {
             'createdAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
 
+      debugPrint('Successfully registered device with ID: $deviceId');
       return true;
     } catch (e) {
       debugPrint('Error registering device: $e');
@@ -237,6 +297,7 @@ class LibP2PService {
               .collection('users')
               .doc(userId)
               .collection('devices')
+              .orderBy('lastActive', descending: true)
               .get();
 
       return snapshot.docs.map((doc) => doc.data()).toList();
@@ -252,18 +313,35 @@ class LibP2PService {
     required Map<String, dynamic> data,
   }) async {
     if (!_isConnected || _peerId == null) {
-      await initNode();
-      if (!_isConnected) return false;
+      final nodeInit = await initNode();
+      if (nodeInit == null) return false;
     }
 
     try {
+      final currentUser = _auth.currentUser;
+      if (currentUser == null) return false;
+
+      final userId = currentUser.uid;
+      final topic = 'p2p-transfer'; // Default topic for file transfers
+
       final response = await http
           .post(
-            Uri.parse('$_serverUrl/send'),
+            Uri.parse('$_serverUrl/api/peer/send'),
             headers: {'Content-Type': 'application/json'},
-            body: json.encode({'targetPeerId': peerId, 'data': data}),
+            body: json.encode({
+              'userId': userId,
+              'peerId': peerId,
+              'topic': topic,
+              'data': data,
+            }),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          'Error sending data: ${response.statusCode} - ${response.body}',
+        );
+      }
 
       return response.statusCode == 200;
     } catch (e) {

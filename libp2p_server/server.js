@@ -88,6 +88,11 @@ app.get('/', (req, res) => {
   res.json({ status: 'BurrowSpace libp2p Server Running' });
 });
 
+// Status endpoint for compatibility with Flutter app
+app.get('/status', (req, res) => {
+  res.json({ status: 'online' });
+});
+
 // Initialize a new node
 app.post('/api/node/init', async (req, res) => {
   try {

@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'services/ipfs_service.dart';
 import 'services/libp2p_service.dart';
 import 'services/file_transfer_service.dart';
+import 'package:http/http.dart' as http;
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -21,6 +22,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isCheckingLibp2p = false;
   bool _isIpfsConnected = false;
   bool _isLibp2pConnected = false;
+  bool _isWakingServer = false;
   String _ipfsStatus = 'Not connected';
   String _libp2pStatus = 'Not connected';
 
@@ -47,7 +49,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _publicGatewayUrlController.text =
           prefs.getString('ipfs_public_gateway_url') ?? 'https://ipfs.io/ipfs';
       _libp2pServerUrlController.text =
-          prefs.getString('libp2p_server_url') ?? 'http://127.0.0.1:3000';
+          prefs.getString('libp2p_server_url') ??
+          'https://burrowspaceapp-libp2p.onrender.com';
       _usePublicGateway = prefs.getBool('use_public_gateway') ?? true;
     });
   }
@@ -124,16 +127,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final isConnected = await _libp2pService.checkServerStatus();
 
-      setState(() {
-        _isLibp2pConnected = isConnected;
-        _libp2pStatus =
-            isConnected
-                ? 'Connected to libp2p server'
-                : 'Failed to connect to libp2p server';
-      });
+      if (!isConnected &&
+          _libp2pServerUrlController.text.contains('render.com')) {
+        // If using Render and not connected, it might be sleeping
+        setState(() {
+          _isLibp2pConnected = false;
+          _isWakingServer = true;
+          _libp2pStatus =
+              'Server might be sleeping. Attempting to wake it up...';
+        });
+
+        // Try to wake up the server
+        try {
+          await http.get(Uri.parse(_libp2pServerUrlController.text));
+          // Wait for server to wake up
+          await Future.delayed(const Duration(seconds: 5));
+          // Check again
+          final retryConnected = await _libp2pService.checkServerStatus();
+          setState(() {
+            _isLibp2pConnected = retryConnected;
+            _isWakingServer = !retryConnected;
+            _libp2pStatus =
+                retryConnected
+                    ? 'Connected to libp2p server'
+                    : 'Server is still waking up. This may take up to 30 seconds on the free tier.';
+          });
+
+          // If still not connected, schedule another check in 10 seconds
+          if (!retryConnected) {
+            _scheduleRetryCheck();
+          }
+        } catch (e) {
+          setState(() {
+            _isLibp2pConnected = false;
+            _isWakingServer = false;
+            _libp2pStatus = 'Failed to wake up server: $e';
+          });
+        }
+      } else {
+        setState(() {
+          _isLibp2pConnected = isConnected;
+          _isWakingServer = false;
+          _libp2pStatus =
+              isConnected
+                  ? 'Connected to libp2p server'
+                  : 'Failed to connect to libp2p server';
+        });
+      }
     } catch (e) {
       setState(() {
         _isLibp2pConnected = false;
+        _isWakingServer = false;
         _libp2pStatus = 'Error: $e';
       });
     } finally {
@@ -141,6 +185,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _isCheckingLibp2p = false;
       });
     }
+  }
+
+  void _scheduleRetryCheck() {
+    if (!mounted) return;
+
+    Future.delayed(const Duration(seconds: 10), () {
+      if (!mounted || !_isWakingServer) return;
+
+      setState(() {
+        _libp2pStatus = 'Retrying connection to server...';
+      });
+
+      _libp2pService.checkServerStatus().then((isConnected) {
+        if (!mounted) return;
+
+        setState(() {
+          _isLibp2pConnected = isConnected;
+          _isWakingServer = !isConnected;
+          _libp2pStatus =
+              isConnected
+                  ? 'Connected to libp2p server'
+                  : 'Server is still waking up. This may take longer than expected.';
+        });
+
+        // If still not connected, schedule one more check
+        if (!isConnected) {
+          Future.delayed(const Duration(seconds: 15), () {
+            if (!mounted || !_isWakingServer) return;
+            _checkLibp2pConnection();
+          });
+        }
+      });
+    });
   }
 
   @override
@@ -312,7 +389,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           decoration: BoxDecoration(
                             color:
-                                _isLibp2pConnected
+                                _isWakingServer
+                                    ? Colors.orange.withAlpha(20)
+                                    : _isLibp2pConnected
                                     ? Colors.green.withAlpha(20)
                                     : Colors.red.withAlpha(20),
                             borderRadius: BorderRadius.circular(12),
@@ -321,24 +400,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
-                                _isLibp2pConnected
+                                _isWakingServer
+                                    ? Icons.hourglass_empty
+                                    : _isLibp2pConnected
                                     ? Icons.check_circle
                                     : Icons.error_outline,
                                 size: 16,
                                 color:
-                                    _isLibp2pConnected
+                                    _isWakingServer
+                                        ? Colors.orange
+                                        : _isLibp2pConnected
                                         ? Colors.green
                                         : Colors.red,
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                _isLibp2pConnected
+                                _isWakingServer
+                                    ? 'Waking up'
+                                    : _isLibp2pConnected
                                     ? 'Connected'
                                     : 'Disconnected',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color:
-                                      _isLibp2pConnected
+                                      _isWakingServer
+                                          ? Colors.orange
+                                          : _isLibp2pConnected
                                           ? Colors.green
                                           : Colors.red,
                                 ),
@@ -361,31 +448,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       controller: _libp2pServerUrlController,
                       decoration: const InputDecoration(
                         labelText: 'libp2p Server URL',
-                        hintText: 'e.g. http://127.0.0.1:3000',
+                        hintText:
+                            'e.g. https://burrowspaceapp-libp2p.onrender.com',
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 16),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        OutlinedButton.icon(
-                          onPressed:
-                              _isCheckingLibp2p ? null : _checkLibp2pConnection,
-                          icon:
-                              _isCheckingLibp2p
-                                  ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                  : const Icon(Icons.refresh),
-                          label: const Text('Test Connection'),
+                        TextButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _libp2pServerUrlController.text =
+                                  'https://burrowspaceapp-libp2p.onrender.com';
+                            });
+                          },
+                          icon: const Icon(Icons.restore),
+                          label: const Text('Reset to Default'),
                         ),
+                        _isWakingServer
+                            ? OutlinedButton.icon(
+                              onPressed: null,
+                              icon: const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.orange,
+                                ),
+                              ),
+                              label: const Text('Waking Server...'),
+                            )
+                            : OutlinedButton.icon(
+                              onPressed:
+                                  _isCheckingLibp2p
+                                      ? null
+                                      : _checkLibp2pConnection,
+                              icon:
+                                  _isCheckingLibp2p
+                                      ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                      : const Icon(Icons.refresh),
+                              label: const Text('Test Connection'),
+                            ),
                       ],
                     ),
+                    if (_isWakingServer) ...[
+                      const SizedBox(height: 16),
+                      LinearProgressIndicator(
+                        backgroundColor: Colors.orange.withAlpha(30),
+                        color: Colors.orange,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'The Render.com free tier server is waking up. This may take up to 30 seconds.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.orange.shade800,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -462,32 +591,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       children: [
                         _buildInstructionStep(
                           1,
-                          'Download the BurrowSpace libp2p server from github.com/burrowspace/server',
+                          'You can use our hosted server at https://burrowspaceapp-libp2p.onrender.com',
+                          Icons.cloud,
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withAlpha(20),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: Colors.blue.withAlpha(50),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.info_outline,
+                                    color: Colors.blue.shade700,
+                                    size: 20,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'About the Render.com Server',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue.shade700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                '• The server is hosted on Render.com\'s free tier',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                '• It may go to sleep after 15 minutes of inactivity',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                '• The app will attempt to wake it automatically when needed',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                '• Wake-up can take 30+ seconds on the free tier',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildInstructionStep(
+                          2,
+                          'Or run your own server by downloading from github.com/burrowspace/server',
                           Icons.download,
                         ),
                         const SizedBox(height: 8),
                         _buildInstructionStep(
-                          2,
+                          3,
                           'Install Node.js and npm if you haven\'t already',
                           Icons.system_update,
                         ),
                         const SizedBox(height: 8),
                         _buildInstructionStep(
-                          3,
+                          4,
                           'Run "npm install" in the server directory',
                           Icons.terminal,
                         ),
                         const SizedBox(height: 8),
                         _buildInstructionStep(
-                          4,
+                          5,
                           'Start the server with "npm start"',
                           Icons.play_arrow,
                         ),
                         const SizedBox(height: 8),
                         _buildInstructionStep(
-                          5,
-                          'The server will be available at http://127.0.0.1:3000',
+                          6,
+                          'The local server will be available at http://127.0.0.1:3000',
                           Icons.public,
+                        ),
+                        const SizedBox(height: 8),
+                        _buildInstructionStep(
+                          7,
+                          'Note: The Render.com free tier may sleep after inactivity. The app will attempt to wake it automatically.',
+                          Icons.info_outline,
                         ),
                       ],
                     ),
@@ -529,7 +723,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ),
                               const SizedBox(height: 12),
                               const Text(
-                                '1. For the libp2p server, you can use a service like ngrok:',
+                                '1. For the libp2p server, you can use our hosted server:',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                              const SizedBox(height: 4),
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                color: Colors.black87,
+                                child: const Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'https://burrowspaceapp-libp2p.onrender.com',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontFamily: 'monospace',
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                '2. Or use a service like ngrok for your local server:',
                                 style: TextStyle(fontSize: 13),
                               ),
                               const SizedBox(height: 4),
@@ -553,7 +771,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ),
                               const SizedBox(height: 8),
                               const Text(
-                                '2. Use a public IPFS gateway if you don\'t have your own:',
+                                '3. Use a public IPFS gateway if you don\'t have your own:',
                                 style: TextStyle(fontSize: 13),
                               ),
                               const SizedBox(height: 4),
@@ -563,8 +781,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ),
                               const SizedBox(height: 8),
                               const Text(
-                                '3. Enable "Use Public Gateway" option above',
+                                '4. Enable "Use Public Gateway" option above',
                                 style: TextStyle(fontSize: 13),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Note: The Render.com free tier may sleep after inactivity periods. The app will attempt to wake it automatically when needed.',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontStyle: FontStyle.italic,
+                                ),
                               ),
                             ],
                           ),
